@@ -1,0 +1,24 @@
+import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { WithdrawalsService } from './withdrawals.service';
+import { CreateWithdrawalDto } from './dto/create-withdrawal.dto';
+import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
+import { Role } from '@prisma/client';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+
+@ApiTags('Withdrawals')
+@Controller('withdrawals')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(Role.CHAUFFEUR)
+@ApiBearerAuth('JWT-Auth')
+export class WithdrawalsController {
+  constructor(private readonly withdrawalsService: WithdrawalsService) {}
+
+  @Post()
+  @ApiOperation({ summary: 'Demander un retrait (Chauffeur uniquement)' })
+  create(@CurrentUser() user: any, @Body() createWithdrawalDto: CreateWithdrawalDto) {
+    return this.withdrawalsService.create(user.id, createWithdrawalDto);
+  }
+}

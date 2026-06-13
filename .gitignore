@@ -54,3 +54,11 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+/generated/prisma
+prisma/*.db
+prisma/*.db-journal
+
+# Ne pas commiter le .env mais garder .env.example
+.env
+!.env.example

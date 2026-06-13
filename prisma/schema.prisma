@@ -1,0 +1,427 @@
+// ═══════════════════════════════════════════════════
+// Prisma Schema — AutoConnect
+// Base de données: PostgreSQL (local Docker / Neon cloud)
+// ═══════════════════════════════════════════════════
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────
+// ENUMERATIONS
+// ─────────────────────────────────
+
+enum Role {
+  PASSAGER
+  CHAUFFEUR
+  AGENT_GARE
+  ADMIN
+}
+
+enum Langue {
+  FRANCAIS
+  PULAR
+  SOUSSOU
+  MALINKE
+}
+
+enum VehicleStatut {
+  ACTIF
+  INACTIF
+  MAINTENANCE
+}
+
+enum BookingStatut {
+  PENDING       // En attente de confirmation
+  CONFIRMED     // Confirmé
+  PAID          // Payé — QR + OTP générés
+  BOARDING      // Embarquement en cours
+  IN_PROGRESS   // Trajet en cours
+  COMPLETED     // Trajet terminé
+  FUNDS_RELEASED // Fonds libérés du séquestre
+  CANCELLED     // Annulé
+  DISPUTE       // En litige
+  INCIDENT      // Incident signalé
+}
+
+enum PaymentMethode {
+  ORANGE_MONEY
+  MTN_MONEY
+  WALLET
+}
+
+enum PaymentStatut {
+  PENDING      // En attente
+  PROCESSING   // En cours de traitement
+  COMPLETED    // Réussi
+  FAILED       // Échoué
+  REFUNDED     // Remboursé
+}
+
+enum WithdrawalStatut {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum DisputeStatut {
+  OUVERT
+  EN_COURS
+  RESOLU
+  REJETE
+}
+
+enum FreightStatut {
+  EN_ATTENTE
+  EN_TRANSIT
+  LIVRE
+}
+
+// ─────────────────────────────────
+// MODÈLE UTILISATEUR (Base de tous les acteurs)
+// ─────────────────────────────────
+
+model User {
+  id           String    @id @default(uuid())
+  nom          String
+  telephone    String    @unique
+  motDePasse   String
+  role         Role
+  langue       Langue    @default(FRANCAIS)
+  isActive     Boolean   @default(true)
+  isSuspended  Boolean   @default(false)
+  refreshToken String?   // Hashed refresh token
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime? // Soft delete
+
+  // Relations
+  passenger     Passenger?
+  driver        Driver?
+  notifications Notification[]
+  disputes      Dispute[]
+
+  @@index([telephone])
+  @@index([role])
+  @@map("users")
+}
+
+// ─────────────────────────────────
+// PASSAGER
+// ─────────────────────────────────
+
+model Passenger {
+  id        String    @id @default(uuid())
+  userId    String    @unique
+  adresse   String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // Relations
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@map("passengers")
+}
+
+// ─────────────────────────────────
+// CHAUFFEUR
+// ─────────────────────────────────
+
+model Driver {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  numeroPermis    String   @unique
+  experience      Int      @default(0)
+  note            Float    @default(5.0)
+  nombreAvis      Int      @default(0)
+  isAvailable     Boolean  @default(false)
+  isVerified      Boolean  @default(false)
+  latitude        Float?   // Position actuelle
+  longitude       Float?   // Position actuelle
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicles    Vehicle[]
+  bookings    Booking[]
+  wallet      Wallet?
+  gpsLogs     GpsLog[]
+
+  @@index([isAvailable])
+  @@index([isVerified])
+  @@map("drivers")
+}
+
+// ─────────────────────────────────
+// VÉHICULE
+// ─────────────────────────────────
+
+model Vehicle {
+  id              String        @id @default(uuid())
+  driverId        String
+  marque          String
+  modele          String
+  immatriculation String        @unique
+  capacite        Int
+  placesDisponibles Int         @default(0)
+  statut          VehicleStatut @default(ACTIF)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Relations
+  driver   Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+  gpsLogs  GpsLog[]
+
+  @@index([statut])
+  @@map("vehicles")
+}
+
+// ─────────────────────────────────
+// GARE ROUTIÈRE
+// ─────────────────────────────────
+
+model Station {
+  id        String   @id @default(uuid())
+  nom       String
+  ville     String
+  adresse   String
+  latitude  Float?
+  longitude Float?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ville])
+  @@map("stations")
+}
+
+// ─────────────────────────────────
+// RÉSERVATION (Cœur du système)
+// ─────────────────────────────────
+
+model Booking {
+  id            String        @id @default(uuid())
+  passengerId   String
+  driverId      String
+  vehicleId     String
+  departure     String        // Ville de départ
+  destination   String        // Ville de destination
+  places        Int           @default(1)
+  prix          Float
+  statut        BookingStatut @default(PENDING)
+  qrCode        String?       // QR Code crypté (généré après paiement)
+  qrCodeScanned Boolean       @default(false)
+  otpCode       String?       // OTP haché (stocké en Redis)
+  otpVerified   Boolean       @default(false)
+  gpsValidated  Boolean       @default(false)
+  scheduledAt   DateTime?     // Date/heure prévue du départ
+  startedAt     DateTime?     // Date/heure réelle du départ
+  completedAt   DateTime?     // Date/heure d'arrivée
+  cancelledAt   DateTime?
+  cancelReason  String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // Relations
+  passenger     Passenger      @relation(fields: [passengerId], references: [id])
+  driver        Driver         @relation(fields: [driverId], references: [id])
+  vehicle       Vehicle        @relation(fields: [vehicleId], references: [id])
+  payment       Payment?
+  disputes      Dispute[]
+  notifications Notification[]
+
+  @@index([statut])
+  @@index([passengerId])
+  @@index([driverId])
+  @@index([createdAt])
+  @@map("bookings")
+}
+
+// ─────────────────────────────────
+// PAIEMENT
+// ─────────────────────────────────
+
+model Payment {
+  id            String         @id @default(uuid())
+  bookingId     String         @unique
+  montant       Float
+  methode       PaymentMethode
+  statut        PaymentStatut  @default(PENDING)
+  transactionId String?        // ID retourné par l'opérateur
+  operateur     String?        // ORANGE / MTN
+  telephone     String?        // Numéro utilisé pour le paiement
+  failReason    String?        // Raison d'échec
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  // Relations
+  booking Booking @relation(fields: [bookingId], references: [id])
+  escrow  Escrow?
+
+  @@index([statut])
+  @@map("payments")
+}
+
+// ─────────────────────────────────
+// SÉQUESTRE (Escrow)
+// Fonds bloqués jusqu'à validation du trajet
+// ─────────────────────────────────
+
+model Escrow {
+  id          String    @id @default(uuid())
+  paymentId   String    @unique
+  montant     Float
+  isHeld      Boolean   @default(true)
+  isReleased  Boolean   @default(false)
+  releasedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  payment Payment @relation(fields: [paymentId], references: [id])
+
+  @@map("escrow")
+}
+
+// ─────────────────────────────────
+// WALLET — Portefeuille Chauffeur
+// ─────────────────────────────────
+
+model Wallet {
+  id                  String   @id @default(uuid())
+  driverId            String   @unique
+  balance             Float    @default(0) // Solde total
+  pendingBalance      Float    @default(0) // En attente (trajet non validé)
+  withdrawableBalance Float    @default(0) // Disponible pour retrait
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Relations
+  driver      Driver       @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  withdrawals Withdrawal[]
+
+  @@map("wallets")
+}
+
+// ─────────────────────────────────
+// RETRAIT
+// ─────────────────────────────────
+
+model Withdrawal {
+  id         String           @id @default(uuid())
+  walletId   String
+  montant    Float            // Montant demandé
+  commission Float            // Commission plateforme (10%)
+  montantNet Float            // Montant final reçu par le chauffeur
+  operateur  String           // ORANGE / MTN
+  telephone  String           // Numéro de réception
+  statut     WithdrawalStatut @default(PENDING)
+  reference  String?          // Référence de la transaction
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  // Relations
+  wallet Wallet @relation(fields: [walletId], references: [id])
+
+  @@index([statut])
+  @@map("withdrawals")
+}
+
+// ─────────────────────────────────
+// SUIVI GPS
+// ─────────────────────────────────
+
+model GpsLog {
+  id        String   @id @default(uuid())
+  vehicleId String
+  driverId  String
+  latitude  Float
+  longitude Float
+  speed     Float?   // Vitesse en km/h
+  accuracy  Float?   // Précision en mètres
+  createdAt DateTime @default(now())
+
+  // Relations
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id])
+  driver  Driver  @relation(fields: [driverId], references: [id])
+
+  @@index([vehicleId, createdAt])
+  @@map("gps_logs")
+}
+
+// ─────────────────────────────────
+// NOTIFICATION
+// ─────────────────────────────────
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  bookingId String?
+  type      String   // RESERVATION_CONFIRMED | DEPARTURE_SOON | PAYMENT_SUCCESS | etc.
+  titre     String
+  message   String
+  isRead    Boolean  @default(false)
+  data      Json?    // Données additionnelles (flexible)
+  createdAt DateTime @default(now())
+
+  // Relations
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  booking Booking? @relation(fields: [bookingId], references: [id])
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────
+// LITIGE
+// ─────────────────────────────────
+
+model Dispute {
+  id          String        @id @default(uuid())
+  bookingId   String
+  userId      String        // Qui a créé le litige (passager ou chauffeur)
+  description String
+  statut      DisputeStatut @default(OUVERT)
+  resolution  String?       // Décision de l'admin
+  resolvedBy  String?       // ID de l'admin
+  resolvedAt  DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Relations
+  booking Booking @relation(fields: [bookingId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([statut])
+  @@map("disputes")
+}
+
+// ─────────────────────────────────
+// FRET
+// ─────────────────────────────────
+
+model Freight {
+  id          String        @id @default(uuid())
+  poids       Float         // En kg
+  type        String?       // Sacs de riz, électroménager, etc.
+  destination String
+  tarif       Float         // Calculé automatiquement
+  description String?
+  ticketCode  String        @unique @default(uuid())
+  statut      FreightStatut @default(EN_ATTENTE)
+  driverId    String?       // Chauffeur assigné
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([statut])
+  @@map("freight")
+}
