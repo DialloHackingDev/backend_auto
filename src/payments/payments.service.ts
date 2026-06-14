@@ -2,6 +2,8 @@ import { Injectable, BadRequestException, NotFoundException } from '@nestjs/comm
 import { PrismaService } from '../prisma/prisma.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { EscrowService } from '../escrow/escrow.service';
+import { QrService } from '../qr/qr.service';
+import { OtpService } from '../otp/otp.service';
 import { BookingStatut, PaymentStatut } from '@prisma/client';
 
 @Injectable()
@@ -9,6 +11,8 @@ export class PaymentsService {
   constructor(
     private prisma: PrismaService,
     private escrowService: EscrowService,
+    private qrService: QrService,
+    private otpService: OtpService,
   ) {}
 
   async create(createPaymentDto: CreatePaymentDto) {
@@ -49,13 +53,23 @@ export class PaymentsService {
       // 2. Bloquer les fonds dans l'Escrow
       await this.escrowService.holdFunds(payment.id, payment.montant);
 
-      // 3. Mettre à jour le statut de la réservation
+      // 3. Générer le QR Code et l'OTP
+      const qrCodeUrl = await this.qrService.generateBookingQrCode(booking.id);
+      const otpCode = this.otpService.generateOtp();
+      const otpExpiresAt = this.otpService.getExpirationDate(24); // Expire dans 24h
+
+      // 4. Mettre à jour le statut de la réservation et enregistrer les validations
       await prisma.booking.update({
         where: { id: booking.id },
-        data: { statut: BookingStatut.PAID },
+        data: { 
+            statut: BookingStatut.PAID,
+            qrCode: qrCodeUrl,
+            otpCode: otpCode,
+            otpExpiresAt: otpExpiresAt
+        },
       });
 
-      // 4. Mettre à jour le Wallet du chauffeur (pending)
+      // 5. Mettre à jour le Wallet du chauffeur (pending)
       const wallet = await prisma.wallet.findUnique({
           where: { driverId: booking.driverId }
       });
@@ -69,9 +83,15 @@ export class PaymentsService {
           });
       }
 
-      // TODO: Générer QR et OTP
-
-      return payment;
+      // Pour le MVP, on renvoie les codes dans la réponse (en vrai ça serait envoyé par SMS/Push)
+      return {
+          payment,
+          validation: {
+              qrCodeUrl,
+              otpCode,
+              expiresAt: otpExpiresAt
+          }
+      };
     });
   }
 

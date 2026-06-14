@@ -2,11 +2,18 @@ import { Injectable, NotFoundException, ForbiddenException, BadRequestException 
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingStatusDto } from './dto/update-booking-status.dto';
+import { StartBookingDto } from './dto/start-booking.dto';
 import { BookingStatut } from '@prisma/client';
+import { GpsService } from '../gps/gps.service';
+import { OtpService } from '../otp/otp.service';
 
 @Injectable()
 export class BookingsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private gpsService: GpsService,
+    private otpService: OtpService
+  ) {}
 
   async create(userId: string, createBookingDto: CreateBookingDto) {
     const passenger = await this.prisma.passenger.findUnique({
@@ -146,6 +153,63 @@ export class BookingsService {
     return this.prisma.booking.update({
         where: { id },
         data: { statut: dto.statut }
+    });
+  }
+
+  async startTrip(id: string, userId: string, role: string, dto: StartBookingDto) {
+    if (role !== 'CHAUFFEUR') {
+        throw new ForbiddenException('Seul le chauffeur peut démarrer le trajet');
+    }
+
+    const booking = await this.findOne(id, userId, role);
+
+    if (booking.statut !== BookingStatut.PAID) {
+        throw new BadRequestException('La réservation doit être payée avant de démarrer le trajet');
+    }
+
+    // 1. Validation GPS
+    this.gpsService.verifyProximity(
+        dto.driverLatitude,
+        dto.driverLongitude,
+        dto.passengerLatitude,
+        dto.passengerLongitude
+    );
+
+    // 2. Validation OTP ou QR Code
+    let isValidated = false;
+
+    if (dto.otp) {
+        isValidated = this.otpService.verifyOtp(dto.otp, booking.otpCode, booking.otpExpiresAt);
+        if (!isValidated) {
+            throw new BadRequestException('Code OTP invalide ou expiré');
+        }
+    } else if (dto.qrData) {
+        try {
+            const parsedData = JSON.parse(dto.qrData);
+            if (parsedData.bookingId === booking.id) {
+                isValidated = true;
+            } else {
+                throw new BadRequestException('QR Code invalide pour cette réservation');
+            }
+        } catch (e) {
+            throw new BadRequestException('Données QR Code mal formées');
+        }
+    } else {
+        throw new BadRequestException('Vous devez fournir un OTP ou un QR Code scanné pour valider le trajet');
+    }
+
+    // 3. Mise à jour de la réservation
+    return this.prisma.booking.update({
+        where: { id },
+        data: {
+            statut: BookingStatut.IN_PROGRESS,
+            startedAt: new Date(),
+            gpsValidated: true,
+            otpVerified: !!dto.otp,
+            qrCodeScanned: !!dto.qrData,
+            otpCode: null, // Invalider l'OTP
+            otpExpiresAt: null
+        }
     });
   }
 }

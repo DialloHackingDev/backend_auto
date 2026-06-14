@@ -220,7 +220,8 @@ model Booking {
   statut        BookingStatut @default(PENDING)
   qrCode        String?       // QR Code crypté (généré après paiement)
   qrCodeScanned Boolean       @default(false)
-  otpCode       String?       // OTP haché (stocké en Redis)
+  otpCode       String?       // OTP généré après paiement
+  otpExpiresAt  DateTime?     // Expiration de l'OTP
   otpVerified   Boolean       @default(false)
   gpsValidated  Boolean       @default(false)
   scheduledAt   DateTime?     // Date/heure prévue du départ

@@ -2,6 +2,7 @@ import { Controller, Get, Post, Body, Patch, Param, UseGuards } from '@nestjs/co
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingStatusDto } from './dto/update-booking-status.dto';
+import { StartBookingDto } from './dto/start-booking.dto';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -43,5 +44,16 @@ export class BookingsController {
     @Body() updateBookingStatusDto: UpdateBookingStatusDto
   ) {
     return this.bookingsService.updateStatus(id, user.id, user.role, updateBookingStatusDto);
+  }
+
+  @Post(':id/start')
+  @Roles(Role.CHAUFFEUR)
+  @ApiOperation({ summary: 'Démarrer un trajet (Validation GPS + OTP/QR)' })
+  startTrip(
+      @Param('id') id: string,
+      @CurrentUser() user: any,
+      @Body() startBookingDto: StartBookingDto
+  ) {
+      return this.bookingsService.startTrip(id, user.id, user.role, startBookingDto);
   }
 }
