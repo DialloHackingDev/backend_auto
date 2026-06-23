@@ -9,7 +9,7 @@ import { EscrowModule } from '../escrow/escrow.module';
 import { WalletModule } from '../wallet/wallet.module';
 
 @Module({
-  imports: [GpsModule, OtpModule, NotificationsModule, EscrowModule, WalletModule],
+  imports: [GpsModule, OtpModule, QrModule, NotificationsModule, EscrowModule, WalletModule],
   controllers: [BookingsController],
   providers: [BookingsService],
   exports: [BookingsService],
