@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException } from '@nestjs/common';
 import * as qrcode from 'qrcode';
 
 @Injectable()
@@ -23,7 +23,34 @@ export class QrService {
     }
   }
 
-  // Si on veut décoder côté serveur dans une future étape
-  // En général, le décodage se fait via l'appareil photo du chauffeur
-  // qui envoie ensuite le "bookingId" lu à l'API de validation.
+  decodeBookingQrData(qrData: string): { bookingId: string } {
+    if (!qrData || typeof qrData !== 'string') {
+      throw new BadRequestException('Données QR Code invalides');
+    }
+
+    const trimmed = qrData.trim();
+
+    // Accepte soit un JSON stringifié, soit un identifiant brut.
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === 'string') {
+        return { bookingId: parsed };
+      }
+      if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        typeof (parsed as any).bookingId === 'string'
+      ) {
+        return { bookingId: (parsed as any).bookingId };
+      }
+    } catch {
+      // Continue et tente d'utiliser le texte brut
+    }
+
+    if (/^[0-9a-fA-F-]{36}$/.test(trimmed)) {
+      return { bookingId: trimmed };
+    }
+
+    throw new BadRequestException('Données QR Code mal formées');
+  }
 }

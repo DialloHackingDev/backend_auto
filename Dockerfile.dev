@@ -3,13 +3,13 @@ FROM node:20-alpine
 WORKDIR /app
 
 # Installer les outils système
-RUN apk add --no-cache openssl
+RUN apk add --no-cache openssl git
 
 # Copier les fichiers de dépendances
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# Installer les dépendances
+# Installer les dépendances (incluant devDependencies)
 RUN npm ci
 
 # Copier le code source
@@ -18,11 +18,8 @@ COPY . .
 # Générer Prisma Client
 RUN npm run prisma:generate
 
-# Compiler TypeScript
-RUN npm run build
-
 # Exposition du port
 EXPOSE 3000
 
-# Démarrage en production
-CMD ["npm", "run", "start:prod"]
+# Démarrage en développement (avec hot reload)
+CMD ["npm", "run", "start:dev"]

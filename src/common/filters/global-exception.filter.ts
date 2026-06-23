@@ -11,10 +11,17 @@ import { Request, Response } from 'express';
 /**
  * Filtre global d'exceptions — Standardise toutes les réponses d'erreur
  * Format uniforme: { success, statusCode, message, error, timestamp, path }
+ * 
+ * ⚠️ En production, masque les détails sensibles des erreurs 500
  */
 @Catch()
 export class GlobalExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(GlobalExceptionFilter.name);
+  
+  // Déterminer l'environnement depuis le NODE_ENV à l'exécution
+  private get isDevelopment(): boolean {
+    return process.env.NODE_ENV !== 'production';
+  }
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
@@ -43,20 +50,26 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         }
       }
     } else if (exception instanceof Error) {
-      message = exception.message;
+      message = this.isDevelopment ? exception.message : 'Une erreur système est survenue';
       error = exception.name;
     }
 
-    // Log l'erreur (sans les détails sensibles en production)
+    // Log l'erreur complet (stack trace en dev seulement)
     if (statusCode >= 500) {
       this.logger.error(
         `[${request.method}] ${request.url} — ${statusCode}`,
-        exception instanceof Error ? exception.stack : String(exception),
+        this.isDevelopment && exception instanceof Error ? exception.stack : String(exception),
       );
-    } else {
+    } else if (statusCode >= 400) {
       this.logger.warn(
         `[${request.method}] ${request.url} — ${statusCode}: ${message}`,
       );
+    }
+
+    // En production, ne pas révéler les détails des erreurs 500
+    if (!this.isDevelopment && statusCode >= 500) {
+      message = 'Erreur serveur. Veuillez contacter le support.';
+      error = 'Internal Server Error';
     }
 
     response.status(statusCode).json({

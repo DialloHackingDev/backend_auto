@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { GpsService } from '../gps/gps.service';
 import { OtpService } from '../otp/otp.service';
+import { QrService } from '../qr/qr.service';
 import { EscrowService } from '../escrow/escrow.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingStatusDto } from './dto/update-booking-status.dto';
@@ -30,6 +31,7 @@ export class BookingsService {
     private readonly notificationsService: NotificationsService,
     private readonly gpsService: GpsService,
     private readonly otpService: OtpService,
+    private readonly qrService: QrService,
     private readonly escrowService: EscrowService,
   ) {}
 
@@ -366,43 +368,50 @@ export class BookingsService {
     );
 
     // 2. Validation OTP ou QR Code — au moins un des deux est requis
-    let isValidated = false;
+    let otpValidated = false;
+    let qrValidated = false;
+    const validationErrors: string[] = [];
 
     if (dto.otp) {
-      isValidated = this.otpService.verifyOtp(
+      otpValidated = this.otpService.verifyOtp(
         dto.otp,
         booking.otpCode,
         booking.otpExpiresAt,
       );
-      if (!isValidated) {
-        throw new BadRequestException('Code OTP invalide ou expiré');
+      if (!otpValidated) {
+        validationErrors.push('Code OTP invalide ou expiré');
       }
-    } else if (dto.qrData) {
+    }
+
+    if (dto.qrData) {
       try {
-        const parsedData = JSON.parse(dto.qrData) as { bookingId: string };
-        if (parsedData.bookingId !== booking.id) {
-          throw new BadRequestException('QR Code invalide pour cette réservation');
+        const { bookingId } = this.qrService.decodeBookingQrData(dto.qrData);
+        qrValidated = bookingId === booking.id;
+        if (!qrValidated) {
+          validationErrors.push('QR Code invalide pour cette réservation');
         }
-        isValidated = true;
-      } catch {
-        throw new BadRequestException('Données QR Code mal formées');
+      } catch (error) {
+        validationErrors.push((error as Error).message || 'Données QR Code mal formées');
       }
-    } else {
+    }
+
+    if (!otpValidated && !qrValidated) {
       throw new BadRequestException(
-        'Vous devez fournir un OTP ou un QR Code scanné pour valider le trajet',
+        validationErrors.length > 0
+          ? validationErrors.join(' / ')
+          : 'Vous devez fournir un OTP ou un QR Code scanné pour valider le trajet',
       );
     }
 
-    // 3. Mettre à jour la réservation
     const updated = await this.prisma.booking.update({
       where: { id },
       data: {
         statut: BookingStatut.IN_PROGRESS,
         startedAt: new Date(),
         gpsValidated: true,
-        otpVerified: !!dto.otp && isValidated,
-        qrCodeScanned: !!dto.qrData && isValidated,
-        otpCode: null,       // Invalider l'OTP après utilisation
+        otpVerified: otpValidated,
+        qrCodeScanned: qrValidated,
+        otpCode: null,
         otpExpiresAt: null,
       },
     });

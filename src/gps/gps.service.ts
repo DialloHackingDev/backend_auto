@@ -1,10 +1,30 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class GpsService {
+  constructor(private readonly configService: ConfigService) {}
+
+  private validateCoordinate(value: number, min: number, max: number, label: string) {
+    if (typeof value !== 'number' || Number.isNaN(value)) {
+      throw new BadRequestException(`${label} doit être un nombre valide`);
+    }
+
+    if (value < min || value > max) {
+      throw new BadRequestException(`${label} hors limites (${value}). Attendu entre ${min} et ${max}.`);
+    }
+  }
+
+  private getMaxDistance(maxDistance?: number): number {
+    if (maxDistance && maxDistance > 0) {
+      return maxDistance;
+    }
+    return this.configService.get<number>('GPS_MAX_START_DISTANCE_METERS', 100);
+  }
+
   /**
    * Calcule la distance en mètres entre deux points GPS en utilisant la formule de Haversine.
-   * 
+   *
    * @param lat1 Latitude du point 1
    * @param lon1 Longitude du point 1
    * @param lat2 Latitude du point 2
@@ -23,32 +43,45 @@ export class GpsService {
               Math.sin(dl / 2) * Math.sin(dl / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
-    const distance = R * c;
-    return distance; // en mètres
+    return R * c;
   }
 
   /**
-   * Vérifie si deux coordonnées sont à proximité l'une de l'autre
-   * 
+   * Vérifie si deux coordonnées sont à proximité l'une de l'autre.
+   *
    * @param driverLat Latitude du chauffeur
    * @param driverLon Longitude du chauffeur
    * @param passengerLat Latitude du passager
    * @param passengerLon Longitude du passager
-   * @param maxDistance Marge d'erreur en mètres (par défaut 100m)
+   * @param maxDistance Marge d'erreur en mètres (configurable)
    */
   verifyProximity(
-    driverLat: number, 
-    driverLon: number, 
-    passengerLat: number, 
+    driverLat: number,
+    driverLon: number,
+    passengerLat: number,
     passengerLon: number,
-    maxDistance: number = 100
-  ): boolean {
-    const distance = this.calculateDistance(driverLat, driverLon, passengerLat, passengerLon);
-    
-    if (distance > maxDistance) {
-      throw new BadRequestException(`Vous êtes trop loin de l'autre utilisateur (${Math.round(distance)} mètres). Vous devez être à moins de ${maxDistance} mètres pour valider le trajet.`);
+    maxDistance?: number,
+  ): { distance: number; maxDistance: number } {
+    this.validateCoordinate(driverLat, -90, 90, 'Latitude chauffeur');
+    this.validateCoordinate(passengerLat, -90, 90, 'Latitude passager');
+    this.validateCoordinate(driverLon, -180, 180, 'Longitude chauffeur');
+    this.validateCoordinate(passengerLon, -180, 180, 'Longitude passager');
+
+    const distance = this.calculateDistance(
+      driverLat,
+      driverLon,
+      passengerLat,
+      passengerLon,
+    );
+
+    const allowedDistance = this.getMaxDistance(maxDistance);
+
+    if (distance > allowedDistance) {
+      throw new BadRequestException(
+        `Échec de la validation GPS : ${Math.round(distance)} mètres séparant le chauffeur et le passager. Distance autorisée : ${allowedDistance} mètres.`,
+      );
     }
 
-    return true;
+    return { distance, maxDistance: allowedDistance };
   }
 }
