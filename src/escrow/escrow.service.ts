@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { PaymentStatut } from '@prisma/client';
+import { BookingStatut, PaymentStatut } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -61,7 +61,10 @@ export class EscrowService {
       // 3. Mettre à jour la réservation
       return prisma.booking.update({
         where: { id: bookingId },
-        data: { statut: 'FUNDS_RELEASED' },
+        data: {
+          statut: BookingStatut.FUNDS_RELEASED,
+          completedAt: booking.completedAt ?? new Date(),
+        },
       });
     });
   }

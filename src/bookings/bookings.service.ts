@@ -295,20 +295,22 @@ export class BookingsService {
         throw new BadRequestException('Le trajet doit être en cours pour être terminé');
       }
 
-      const updated = await this.prisma.booking.update({
+      const completed = await this.prisma.booking.update({
         where: { id },
         data: { statut: BookingStatut.COMPLETED, completedAt: new Date() },
       });
+
+      const released = await this.escrowService.releaseFunds(id);
 
       await this.notificationsService.create({
         userId: booking.passenger.user.id,
         bookingId: id,
         type: 'TRIP_COMPLETED',
         titre: 'Trajet terminé',
-        message: `Votre trajet ${booking.departure} → ${booking.destination} est terminé. Merci d'utiliser AutoConnect !`,
+        message: `Votre trajet ${booking.departure} → ${booking.destination} est terminé. Les fonds sont en cours de libération pour le chauffeur.`,
       });
 
-      return updated;
+      return released;
     }
 
     // Par défaut (ADMIN ou cas non couverts ci-dessus)

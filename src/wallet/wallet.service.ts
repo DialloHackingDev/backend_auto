@@ -37,7 +37,7 @@ export class WalletService {
     const driver = await this.prisma.driver.findUnique({ where: { userId } });
     
     if (!driver) {
-        throw new NotFoundException('Profil chauffeur introuvable');
+      throw new NotFoundException('Profil chauffeur introuvable');
     }
 
     const wallet = await this.prisma.wallet.findUnique({
@@ -54,14 +54,31 @@ export class WalletService {
       throw new NotFoundException('Portefeuille introuvable');
     }
 
-    return wallet;
+    const totalCommissionPaid = wallet.withdrawals.reduce(
+      (total, withdrawal) => total + withdrawal.commission,
+      0,
+    );
+
+    const totalWithdrawalsRequested = wallet.withdrawals.reduce(
+      (total, withdrawal) => total + withdrawal.montant,
+      0,
+    );
+
+    return {
+      balance: wallet.balance,
+      withdrawableBalance: wallet.withdrawableBalance,
+      pendingBalance: wallet.pendingBalance,
+      totalWithdrawalsRequested,
+      totalCommissionPaid,
+      recentWithdrawals: wallet.withdrawals,
+    };
   }
 
   async getHistory(userId: string) {
     const driver = await this.prisma.driver.findUnique({ where: { userId } });
     
     if (!driver) {
-        throw new NotFoundException('Profil chauffeur introuvable');
+      throw new NotFoundException('Profil chauffeur introuvable');
     }
 
     const wallet = await this.prisma.wallet.findUnique({
@@ -77,24 +94,50 @@ export class WalletService {
       throw new NotFoundException('Portefeuille introuvable');
     }
 
-    // In a full implementation, history would also include completed bookings 
-    // where funds were released to this wallet.
     const bookings = await this.prisma.booking.findMany({
       where: { driverId: driver.id, statut: 'FUNDS_RELEASED' },
       include: { payment: true },
       orderBy: { completedAt: 'desc' },
     });
 
+    const totalCommissionPaid = wallet.withdrawals.reduce(
+      (total, withdrawal) => total + withdrawal.commission,
+      0,
+    );
+
+    const totalWithdrawalsRequested = wallet.withdrawals.reduce(
+      (total, withdrawal) => total + withdrawal.montant,
+      0,
+    );
+
     return {
-      wallet,
-      history: {
+      wallet: {
+        balance: wallet.balance,
+        pendingBalance: wallet.pendingBalance,
+        withdrawableBalance: wallet.withdrawableBalance,
+        totalWithdrawalsRequested,
+        totalCommissionPaid,
         withdrawals: wallet.withdrawals,
-        earnings: bookings.map(b => ({
+      },
+      history: {
+        withdrawals: wallet.withdrawals.map((withdrawal) => ({
+          id: withdrawal.id,
+          montant: withdrawal.montant,
+          commission: withdrawal.commission,
+          montantNet: withdrawal.montantNet,
+          operateur: withdrawal.operateur,
+          telephone: withdrawal.telephone,
+          statut: withdrawal.statut,
+          reference: withdrawal.reference,
+          createdAt: withdrawal.createdAt,
+          updatedAt: withdrawal.updatedAt,
+        })),
+        earnings: bookings.map((b) => ({
           bookingId: b.id,
           amount: b.payment?.montant,
           date: b.completedAt,
         })),
-      }
+      },
     };
   }
 }

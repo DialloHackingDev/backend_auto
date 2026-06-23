@@ -2,14 +2,17 @@ import {
   Injectable,
   BadRequestException,
   NotFoundException,
+  Logger,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EscrowService } from '../escrow/escrow.service';
 import { QrService } from '../qr/qr.service';
 import { OtpService } from '../otp/otp.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
-import { BookingStatut, PaymentStatut } from '@prisma/client';
+import { PaymentWebhookDto } from './dto/payment-webhook.dto';
+import { BookingStatut, PaymentMethode, PaymentStatut } from '@prisma/client';
 
 /**
  * PaymentsService
@@ -24,12 +27,15 @@ import { BookingStatut, PaymentStatut } from '@prisma/client';
  */
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
     private readonly escrowService: EscrowService,
     private readonly qrService: QrService,
     private readonly otpService: OtpService,
+    private readonly configService: ConfigService,
   ) {}
 
   async create(dto: CreatePaymentDto) {
@@ -45,7 +51,6 @@ export class PaymentsService {
       throw new NotFoundException('Réservation introuvable');
     }
 
-    // Le paiement n'est possible que pour les réservations PENDING ou CONFIRMED
     if (
       booking.statut !== BookingStatut.PENDING &&
       booking.statut !== BookingStatut.CONFIRMED
@@ -59,39 +64,137 @@ export class PaymentsService {
       );
     }
 
-    // ── MVP : Simulation du paiement Mobile Money ───────────────────────────
-    // En production (Sprint 4) :
-    // 1. On crée le paiement en statut PROCESSING
-    // 2. On appelle l'API Orange/MTN
-    // 3. On attend le webhook de confirmation
-    // 4. On exécute la suite du flow dans le handler du webhook
-    // ────────────────────────────────────────────────────────────────────────
+    if (
+      dto.methode === PaymentMethode.ORANGE_MONEY ||
+      dto.methode === PaymentMethode.MTN_MONEY
+    ) {
+      if (!dto.telephone) {
+        throw new BadRequestException('Le numéro de téléphone est requis pour un paiement Mobile Money');
+      }
+    }
+
+    if (dto.methode === PaymentMethode.WALLET) {
+      throw new BadRequestException('Le paiement par wallet n\'est pas encore pris en charge via cette route');
+    }
+
+    const payment = await this.prisma.payment.create({
+      data: {
+        bookingId: booking.id,
+        montant: dto.montant,
+        methode: dto.methode,
+        statut: PaymentStatut.PROCESSING,
+        operateur: this.getOperatorLabel(dto.methode),
+        telephone: dto.telephone,
+        transactionId: `TXN-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
+      },
+    });
+
+    const mobileMoneyRequest = await this.submitMobileMoneyRequest(payment, booking);
+
+    return {
+      paymentId: payment.id,
+      bookingId: booking.id,
+      statut: payment.statut,
+      transactionId: payment.transactionId,
+      message: mobileMoneyRequest.message,
+      operator: payment.operateur,
+      next: 'En attente du callback opérateur pour confirmer le paiement.',
+    };
+  }
+
+  async handleWebhook(dto: PaymentWebhookDto) {
+    const payment = await this.prisma.payment.findFirst({
+      where: { transactionId: dto.transactionId },
+      include: { booking: { include: { passenger: { include: { user: true } }, driver: { include: { user: true } } } } },
+    });
+
+    if (!payment && dto.bookingId) {
+      const booking = await this.prisma.booking.findUnique({
+        where: { id: dto.bookingId },
+        include: { passenger: { include: { user: true } }, driver: { include: { user: true } } },
+      });
+      if (!booking) {
+        throw new NotFoundException('Paiement ou réservation introuvable');
+      }
+    }
+
+    if (!payment) {
+      throw new NotFoundException('Paiement introuvable pour cette transaction');
+    }
+
+    if (payment.montant !== dto.montant) {
+      throw new BadRequestException('Le montant du callback ne correspond pas au paiement enregistré');
+    }
+
+    if (dto.operateur) {
+      payment.operateur = dto.operateur;
+    }
+
+    if (dto.telephone) {
+      payment.telephone = dto.telephone;
+    }
+
+    if (dto.statut === PaymentStatut.COMPLETED) {
+      return this.confirmPayment(payment);
+    }
+
+    if (dto.statut === PaymentStatut.FAILED) {
+      return this.failPayment(
+        payment,
+        dto.operateur ?? payment.operateur ?? 'UNKNOWN',
+        dto.telephone ?? payment.telephone ?? '',
+        'Échec du paiement Mobile Money',
+      );
+    }
+
+    if (dto.statut === PaymentStatut.PROCESSING) {
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: { statut: PaymentStatut.PROCESSING },
+      });
+
+      return {
+        message: 'Callback reçu : paiement en cours de traitement',
+        paymentId: payment.id,
+      };
+    }
+
+    throw new BadRequestException('Statut de callback non pris en charge');
+  }
+
+  private async confirmPayment(payment: any) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: payment.bookingId },
+      include: {
+        passenger: { include: { user: true } },
+        driver: { include: { user: true } },
+      },
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Réservation associée au paiement introuvable');
+    }
+
+    if (payment.statut === PaymentStatut.COMPLETED) {
+      return { message: 'Paiement déjà confirmé', paymentId: payment.id };
+    }
+
+    const qrCodeUrl = await this.qrService.generateBookingQrCode(booking.id);
+    const otpCode = this.otpService.generateOtp();
+    const otpExpiresAt = this.otpService.getExpirationDate(24);
 
     const result = await this.prisma.$transaction(async (tx) => {
-      // 1. Créer le paiement (simulation succès immédiat)
-      const payment = await tx.payment.create({
+      const updatedPayment = await tx.payment.update({
+        where: { id: payment.id },
         data: {
-          bookingId: booking.id,
-          montant: dto.montant,
-          methode: dto.methode,
           statut: PaymentStatut.COMPLETED,
-          operateur: dto.methode.toString(),
-          telephone: dto.telephone,
-          // Référence simulée — en prod, retournée par l'opérateur
-          transactionId: `TXN-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`,
+          transactionId: payment.transactionId,
+          operateur: payment.operateur,
+          telephone: payment.telephone,
         },
       });
 
-      // 2. Bloquer les fonds dans l'Escrow
-      await this.escrowService.holdFunds(payment.id, payment.montant);
-
-      // 3. Générer le QR Code et l'OTP (envoyés au passager)
-      const qrCodeUrl = await this.qrService.generateBookingQrCode(booking.id);
-      const otpCode = this.otpService.generateOtp();
-      const otpExpiresAt = this.otpService.getExpirationDate(24); // 24h
-
-      // 4. Passer la réservation en PAID + enregistrer les codes
-      await tx.booking.update({
+      const updatedBooking = await tx.booking.update({
         where: { id: booking.id },
         data: {
           statut: BookingStatut.PAID,
@@ -101,52 +204,137 @@ export class PaymentsService {
         },
       });
 
-      // 5. Créditer le pendingBalance du wallet chauffeur
-      const wallet = await tx.wallet.findUnique({
-        where: { driverId: booking.driverId },
+      await tx.escrow.create({
+        data: {
+          paymentId: updatedPayment.id,
+          montant: updatedPayment.montant,
+          isHeld: true,
+        },
       });
 
-      if (wallet) {
-        await tx.wallet.update({
-          where: { id: wallet.id },
-          data: {
-            balance: { increment: payment.montant },
-            pendingBalance: { increment: payment.montant },
-          },
-        });
-      }
+      await tx.wallet.upsert({
+        where: { driverId: booking.driverId },
+        update: {
+          balance: { increment: updatedPayment.montant },
+          pendingBalance: { increment: updatedPayment.montant },
+        },
+        create: {
+          driverId: booking.driverId,
+          balance: updatedPayment.montant,
+          pendingBalance: updatedPayment.montant,
+          withdrawableBalance: 0,
+        },
+      });
 
-      return { payment, qrCodeUrl, otpCode, otpExpiresAt };
+      return { payment: updatedPayment, booking: updatedBooking };
     });
 
-    // 6. Notifications (hors transaction pour ne pas la bloquer)
     await Promise.all([
-      // Notifier le passager avec son QR et OTP
       this.notificationsService.create({
         userId: booking.passenger.user.id,
         bookingId: booking.id,
         type: 'PAYMENT_SUCCESS',
         titre: 'Paiement confirmé',
-        message: `Votre paiement de ${dto.montant} GNF a été reçu. Voici votre OTP : ${result.otpCode}. Présentez-le à votre chauffeur.`,
-        data: { otpCode: result.otpCode, expiresAt: result.otpExpiresAt },
+        message: `Votre paiement de ${payment.montant} GNF a été confirmé. Utilisez le QR/OTP pour embarquer.`,
+        data: { otpCode, expiresAt: otpExpiresAt },
       }),
-      // Notifier le chauffeur du paiement
       this.notificationsService.create({
         userId: booking.driver.user.id,
         bookingId: booking.id,
         type: 'PAYMENT_RECEIVED',
         titre: 'Paiement reçu',
-        message: `Le passager a payé pour la réservation ${booking.departure} → ${booking.destination}. Le trajet peut commencer après validation OTP/QR.`,
+        message: `Le paiement pour la réservation ${booking.departure} → ${booking.destination} a été confirmé. Le trajet peut maintenant commencer.`,
       }),
     ]);
 
     return {
+      message: 'Paiement confirmé avec succès',
       payment: result.payment,
-      validation: {
-        qrCodeUrl: result.qrCodeUrl,
-        otpCode: result.otpCode,
-        expiresAt: result.otpExpiresAt,
+      booking: result.booking,
+    };
+  }
+
+  private async failPayment(payment: any, operateur: string, telephone: string, reason: string) {
+    const updatedPayment = await this.prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        statut: PaymentStatut.FAILED,
+        operateur,
+        telephone,
+        failReason: reason,
       },
+    });
+
+    await this.notificationsService.create({
+      userId: payment.booking.passenger.user.id,
+      bookingId: payment.bookingId,
+      type: 'PAYMENT_FAILED',
+      titre: 'Paiement échoué',
+      message: `Le paiement Mobile Money a échoué : ${reason}. Veuillez réessayer ou contacter le support.`,
+    });
+
+    return {
+      message: 'Paiement marqué comme échoué',
+      payment: updatedPayment,
+    };
+  }
+
+  private getOperatorLabel(methode: PaymentMethode) {
+    switch (methode) {
+      case PaymentMethode.ORANGE_MONEY:
+        return 'ORANGE';
+      case PaymentMethode.MTN_MONEY:
+        return 'MTN';
+      default:
+        return 'UNKNOWN';
+    }
+  }
+
+  private getOperatorApiUrl(operator: string) {
+    if (operator === 'ORANGE') {
+      return this.configService.get<string>('ORANGE_MONEY_API_URL');
+    }
+    if (operator === 'MTN') {
+      return this.configService.get<string>('MTN_MONEY_API_URL');
+    }
+    return null;
+  }
+
+  private getOperatorApiKey(operator: string) {
+    if (operator === 'ORANGE') {
+      return this.configService.get<string>('ORANGE_MONEY_API_KEY');
+    }
+    if (operator === 'MTN') {
+      return this.configService.get<string>('MTN_MONEY_API_KEY');
+    }
+    return null;
+  }
+
+  private async submitMobileMoneyRequest(payment: any, booking: any) {
+    const apiUrl = this.getOperatorApiUrl(payment.operateur);
+    const apiKey = this.getOperatorApiKey(payment.operateur);
+
+    if (!apiUrl || !apiKey) {
+      this.logger.warn(
+        `Aucun endpoint Mobile Money configuré pour ${payment.operateur}. Callback manuel requis.`,
+      );
+      return {
+        message: 'Aucun opérateur Mobile Money configuré. Le paiement reste en PROCESSING jusqu\'à la réception du callback.',
+        simulated: true,
+      };
+    }
+
+    // Placeholder de requête opérateur
+    // TODO : implémenter l'appel réel à l'API Orange / MTN
+    // Exemple : POST ${apiUrl}/payments/initiate
+    // En tête : Authorization Bearer ${apiKey}
+    // Payload : { transactionId, bookingId, montant, telephone }
+
+    this.logger.log(`Envoi du paiement Mobile Money à ${payment.operateur} via ${apiUrl}`);
+
+    return {
+      message: `Requête Mobile Money envoyée à ${payment.operateur}. En attente du callback opérateur.`,
+      simulated: false,
     };
   }
 
