@@ -15,6 +15,12 @@ import { EscrowModule } from './escrow/escrow.module';
 import { PaymentsModule } from './payments/payments.module';
 import { WalletModule } from './wallet/wallet.module';
 import { WithdrawalsModule } from './withdrawals/withdrawals.module';
+import { OtpModule } from './otp/otp.module';
+import { QrModule } from './qr/qr.module';
+import { GpsModule } from './gps/gps.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { DisputesModule } from './disputes/disputes.module';
+import { FreightModule } from './freight/freight.module';
 
 @Module({
   imports: [
@@ -29,13 +35,13 @@ import { WithdrawalsModule } from './withdrawals/withdrawals.module';
 
     // ─────────────────────────────────
     // Base de données Prisma (global)
-    // PrismaService disponible dans tous les modules
+    // PrismaService disponible dans tous les modules sans import explicite
     // ─────────────────────────────────
     PrismaModule,
 
     // ─────────────────────────────────
     // Rate Limiting — Protection DDoS / Brute Force
-    // 100 requêtes par minute par IP
+    // 100 requêtes par minute par IP (configurable via .env)
     // ─────────────────────────────────
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
@@ -49,7 +55,7 @@ import { WithdrawalsModule } from './withdrawals/withdrawals.module';
     }),
 
     // ─────────────────────────────────
-    // Modules Métier
+    // Modules Métier — Phase 2 (Core)
     // ─────────────────────────────────
     AuthModule,
     UsersModule,
@@ -61,13 +67,24 @@ import { WithdrawalsModule } from './withdrawals/withdrawals.module';
     EscrowModule,
     WalletModule,
     WithdrawalsModule,
-    // OtpModule,         ← Phase 4
-    // QrModule,          ← Phase 4
-    // GpsModule,         ← Phase 4
-    // NotificationsModule, ← Phase 5
-    // DisputesModule,    ← Phase 6
-    // AdminModule,       ← Phase 6
-    // FreightModule,     ← Phase 6
+
+    // ─────────────────────────────────
+    // Modules Utilitaires — Validation anti-fraude
+    // ─────────────────────────────────
+    OtpModule,
+    QrModule,
+    GpsModule,
+
+    // ─────────────────────────────────
+    // Modules Métier — Sprint 1
+    // ─────────────────────────────────
+    NotificationsModule,
+    DisputesModule,
+    FreightModule,
+
+    // À activer dans les sprints suivants :
+    // AdminModule,    ← Sprint 3
+    // RealtimeModule, ← Sprint 3 (Socket.io)
   ],
   controllers: [AppController],
   providers: [AppService],

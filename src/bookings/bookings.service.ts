@@ -1,23 +1,46 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { GpsService } from '../gps/gps.service';
+import { OtpService } from '../otp/otp.service';
+import { EscrowService } from '../escrow/escrow.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingStatusDto } from './dto/update-booking-status.dto';
 import { StartBookingDto } from './dto/start-booking.dto';
-import { BookingStatut } from '@prisma/client';
-import { GpsService } from '../gps/gps.service';
-import { OtpService } from '../otp/otp.service';
+import { BookingStatut, PaymentStatut, Role } from '@prisma/client';
 
+/**
+ * BookingsService
+ *
+ * Gère l'intégralité du cycle de vie d'une réservation :
+ * PENDING → CONFIRMED → PAID → BOARDING → IN_PROGRESS → COMPLETED → FUNDS_RELEASED
+ *
+ * Chaque transition d'état déclenche automatiquement une notification
+ * vers l'autre acteur (passager ↔ chauffeur).
+ */
 @Injectable()
 export class BookingsService {
   constructor(
-    private prisma: PrismaService,
-    private gpsService: GpsService,
-    private otpService: OtpService
+    private readonly prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
+    private readonly gpsService: GpsService,
+    private readonly otpService: OtpService,
+    private readonly escrowService: EscrowService,
   ) {}
 
-  async create(userId: string, createBookingDto: CreateBookingDto) {
+  // ─────────────────────────────────────────────────
+  // CRÉATION — Passager crée une réservation
+  // ─────────────────────────────────────────────────
+
+  async create(userId: string, dto: CreateBookingDto) {
     const passenger = await this.prisma.passenger.findUnique({
       where: { userId },
+      include: { user: true },
     });
 
     if (!passenger) {
@@ -25,8 +48,8 @@ export class BookingsService {
     }
 
     const vehicle = await this.prisma.vehicle.findUnique({
-      where: { id: createBookingDto.vehicleId },
-      include: { driver: true },
+      where: { id: dto.vehicleId },
+      include: { driver: { include: { user: true } } },
     });
 
     if (!vehicle) {
@@ -34,182 +57,363 @@ export class BookingsService {
     }
 
     if (vehicle.statut !== 'ACTIF' || !vehicle.driver.isAvailable) {
-        throw new BadRequestException('Ce véhicule ou son chauffeur n\'est pas disponible');
+      throw new BadRequestException(
+        'Ce véhicule ou son chauffeur n\'est pas disponible',
+      );
     }
 
-    if (vehicle.placesDisponibles < createBookingDto.places) {
-      throw new BadRequestException(`Pas assez de places disponibles. Restant: ${vehicle.placesDisponibles}`);
+    if (vehicle.placesDisponibles < dto.places) {
+      throw new BadRequestException(
+        `Pas assez de places disponibles. Restant : ${vehicle.placesDisponibles}`,
+      );
     }
 
-    // Calcul du prix (MVP: Prix fixe ou basé sur une logique simplifiée)
-    // Idéalement, cela viendrait d'une table de tarifs
-    const prixUnitaire = 100000; // 100 000 GNF par place
-    const prixTotal = prixUnitaire * createBookingDto.places;
+    // TODO Sprint 2: Remplacer par une table de tarifs dynamique
+    const prixUnitaire = 100_000; // 100 000 GNF par place (MVP)
+    const prixTotal = prixUnitaire * dto.places;
 
-    // Utilisation d'une transaction pour créer la réservation et mettre à jour les places
-    return this.prisma.$transaction(async (prisma) => {
-        const booking = await prisma.booking.create({
-            data: {
-              passengerId: passenger.id,
-              driverId: vehicle.driver.id,
-              vehicleId: vehicle.id,
-              departure: createBookingDto.departure,
-              destination: createBookingDto.destination,
-              places: createBookingDto.places,
-              prix: prixTotal,
-              statut: BookingStatut.PENDING,
-            },
-        });
+    const booking = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.booking.create({
+        data: {
+          passengerId: passenger.id,
+          driverId: vehicle.driver.id,
+          vehicleId: vehicle.id,
+          departure: dto.departure,
+          destination: dto.destination,
+          places: dto.places,
+          prix: prixTotal,
+          statut: BookingStatut.PENDING,
+        },
+      });
 
-        await prisma.vehicle.update({
-            where: { id: vehicle.id },
-            data: {
-                placesDisponibles: {
-                    decrement: createBookingDto.places
-                }
-            }
-        });
+      await tx.vehicle.update({
+        where: { id: vehicle.id },
+        data: { placesDisponibles: { decrement: dto.places } },
+      });
 
-        // Ici, on pourrait déclencher un événement Socket.io pour informer le chauffeur
-        return booking;
+      return created;
     });
+
+    // Notifier le chauffeur d'une nouvelle demande
+    const notifyingDriver = this.notificationsService.create({
+      userId: vehicle.driver.user.id,
+      bookingId: booking.id,
+      type: 'BOOKING_NEW',
+      titre: 'Nouvelle réservation',
+      message: `Vous avez reçu une demande de réservation de ${dto.departure} vers ${dto.destination}.`,
+      data: { bookingId: booking.id, places: dto.places, prix: prixTotal },
+    });
+
+    // Notifier le passager que sa réservation est en attente de confirmation
+    const notifyingPassenger = this.notificationsService.create({
+      userId: passenger.user.id,
+      bookingId: booking.id,
+      type: 'BOOKING_PENDING',
+      titre: 'Réservation en attente',
+      message: `Votre réservation ${dto.departure} → ${dto.destination} est enregistrée. En attente de confirmation par le chauffeur.`,
+      data: { bookingId: booking.id, places: dto.places, prix: prixTotal },
+    });
+
+    await Promise.all([notifyingDriver, notifyingPassenger]);
+
+    return booking;
   }
 
+  // ─────────────────────────────────────────────────
+  // LECTURE
+  // ─────────────────────────────────────────────────
+
   async findAllForUser(userId: string, role: string) {
-    if (role === 'PASSAGER') {
-        const passenger = await this.prisma.passenger.findUnique({ where: { userId }});
-        if (!passenger) return [];
-        return this.prisma.booking.findMany({ where: { passengerId: passenger.id }, include: { vehicle: true, driver: { include: { user: { select: { nom: true, telephone: true } } } } } });
-    } else if (role === 'CHAUFFEUR') {
-        const driver = await this.prisma.driver.findUnique({ where: { userId }});
-        if (!driver) return [];
-        return this.prisma.booking.findMany({ where: { driverId: driver.id }, include: { vehicle: true, passenger: { include: { user: { select: { nom: true, telephone: true } } } } } });
+    if (role === Role.PASSAGER) {
+      const passenger = await this.prisma.passenger.findUnique({ where: { userId } });
+      if (!passenger) return [];
+      return this.prisma.booking.findMany({
+        where: { passengerId: passenger.id },
+        include: {
+          vehicle: true,
+          driver: { include: { user: { select: { nom: true, telephone: true } } } },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
     }
-    
-    // Si ADMIN
-    return this.prisma.booking.findMany({ include: { vehicle: true } });
+
+    if (role === Role.CHAUFFEUR) {
+      const driver = await this.prisma.driver.findUnique({ where: { userId } });
+      if (!driver) return [];
+      return this.prisma.booking.findMany({
+        where: { driverId: driver.id },
+        include: {
+          vehicle: true,
+          passenger: { include: { user: { select: { nom: true, telephone: true } } } },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+    }
+
+    // ADMIN — toutes les réservations
+    return this.prisma.booking.findMany({
+      include: { vehicle: true, passenger: true, driver: true },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   async findOne(id: string, userId: string, role: string) {
     const booking = await this.prisma.booking.findUnique({
       where: { id },
       include: {
-          vehicle: true,
-          passenger: { include: { user: { select: { nom: true, telephone: true, id: true } } } },
-          driver: { include: { user: { select: { nom: true, telephone: true, id: true } } } },
-          payment: true
-      }
+        vehicle: true,
+        passenger: { include: { user: { select: { nom: true, telephone: true, id: true } } } },
+        driver: { include: { user: { select: { nom: true, telephone: true, id: true } } } },
+        payment: true,
+      },
     });
 
     if (!booking) {
-      throw new NotFoundException(`Réservation avec l'ID ${id} introuvable`);
+      throw new NotFoundException(`Réservation ${id} introuvable`);
     }
 
-    // Vérification des droits d'accès
-    if (role !== 'ADMIN' && booking.passenger.user.id !== userId && booking.driver.user.id !== userId) {
-        throw new ForbiddenException('Vous n\'avez pas accès à cette réservation');
+    if (
+      role !== Role.ADMIN &&
+      booking.passenger.user.id !== userId &&
+      booking.driver.user.id !== userId
+    ) {
+      throw new ForbiddenException('Vous n\'avez pas accès à cette réservation');
     }
 
     return booking;
   }
 
-  async updateStatus(id: string, userId: string, role: string, dto: UpdateBookingStatusDto) {
+  // ─────────────────────────────────────────────────
+  // MISE À JOUR STATUT — Machine à états simplifiée (MVP)
+  // ─────────────────────────────────────────────────
+
+  async updateStatus(
+    id: string,
+    userId: string,
+    role: string,
+    dto: UpdateBookingStatusDto,
+  ) {
     const booking = await this.findOne(id, userId, role);
 
-    // TODO: Implémenter la logique complète de la machine à états
-    // Pour l'instant, MVP : on permet d'annuler
+    // ── Annulation ──────────────────────────────────
+    if (booking.statut === BookingStatut.CANCELLED) {
+      throw new BadRequestException('Cette réservation a déjà été annulée');
+    }
+
     if (dto.statut === BookingStatut.CANCELLED) {
-        if (booking.statut === BookingStatut.COMPLETED || booking.statut === BookingStatut.IN_PROGRESS) {
-            throw new BadRequestException('Impossible d\'annuler un trajet en cours ou terminé');
+      if (
+        booking.statut === BookingStatut.COMPLETED ||
+        booking.statut === BookingStatut.IN_PROGRESS
+      ) {
+        throw new BadRequestException('Impossible d\'annuler un trajet en cours ou terminé');
+      }
+
+      const cancelledByPassenger = booking.passenger.user.id === userId;
+      const cancelledByDriver = booking.driver.user.id === userId;
+
+      if (!cancelledByPassenger && !cancelledByDriver && role !== Role.ADMIN) {
+        throw new ForbiddenException('Vous ne pouvez pas annuler cette réservation');
+      }
+
+      const cancellationReason = dto.cancelReason
+        ? dto.cancelReason
+        : cancelledByPassenger
+        ? 'Annulation passager'
+        : 'Annulation chauffeur';
+
+      const updated = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.booking.update({
+          where: { id },
+          data: {
+            statut: BookingStatut.CANCELLED,
+            cancelledAt: new Date(),
+            cancelReason: cancellationReason,
+          },
+        });
+
+        await tx.vehicle.update({
+          where: { id: booking.vehicleId },
+          data: { placesDisponibles: { increment: booking.places } },
+        });
+
+          if (booking.payment && booking.payment.statut === PaymentStatut.COMPLETED) {
+          const policy = this.getCancellationPolicy(booking, cancelledByPassenger);
+          if (policy.action === 'refund') {
+            await this.escrowService.refundFunds(booking.id, policy.reason);
+          }
         }
 
-        return this.prisma.$transaction(async (prisma) => {
-            const updatedBooking = await prisma.booking.update({
-                where: { id },
-                data: { statut: BookingStatut.CANCELLED, cancelledAt: new Date() }
-            });
+        return result;
+      });
 
-            // Restituer les places au véhicule
-            await prisma.vehicle.update({
-                where: { id: booking.vehicleId },
-                data: { placesDisponibles: { increment: booking.places } }
-            });
+      const otherUserId = cancelledByPassenger
+        ? booking.driver.user.id
+        : booking.passenger.user.id;
 
-            // Gérer le remboursement si déjà payé... (à faire avec PaymentsModule)
+      await this.notificationsService.create({
+        userId: otherUserId,
+        bookingId: id,
+        type: 'RESERVATION_CANCELLED',
+        titre: 'Réservation annulée',
+        message: `La réservation ${booking.departure} → ${booking.destination} a été annulée.`,
+      });
 
-            return updatedBooking;
-        });
+      return updated;
     }
 
-    // Si c'est le chauffeur qui confirme la réservation
-    if (dto.statut === BookingStatut.CONFIRMED && role === 'CHAUFFEUR') {
-        return this.prisma.booking.update({
-            where: { id },
-            data: { statut: BookingStatut.CONFIRMED }
-        });
-    }
+    // ── Confirmation par le chauffeur ───────────────
+    if (dto.statut === BookingStatut.CONFIRMED) {
+      if (role !== Role.CHAUFFEUR) {
+        throw new ForbiddenException('Seul le chauffeur peut confirmer la réservation');
+      }
+      if (booking.statut !== BookingStatut.PENDING) {
+        throw new BadRequestException('La réservation doit être en attente pour être confirmée');
+      }
 
-    // Par défaut, mise à jour (restreindre en fonction des rôles dans une version plus complète)
-    return this.prisma.booking.update({
+      const updated = await this.prisma.booking.update({
         where: { id },
-        data: { statut: dto.statut }
+        data: { statut: BookingStatut.CONFIRMED },
+      });
+
+      await this.notificationsService.create({
+        userId: booking.passenger.user.id,
+        bookingId: id,
+        type: 'RESERVATION_CONFIRMED',
+        titre: 'Réservation confirmée',
+        message: `Votre chauffeur a confirmé votre réservation ${booking.departure} → ${booking.destination}. Procédez au paiement.`,
+      });
+
+      return updated;
+    }
+
+    // ── Trajet terminé par le chauffeur ────────────
+    if (dto.statut === BookingStatut.COMPLETED) {
+      if (role !== Role.CHAUFFEUR) {
+        throw new ForbiddenException('Seul le chauffeur peut terminer le trajet');
+      }
+      if (booking.statut !== BookingStatut.IN_PROGRESS) {
+        throw new BadRequestException('Le trajet doit être en cours pour être terminé');
+      }
+
+      const updated = await this.prisma.booking.update({
+        where: { id },
+        data: { statut: BookingStatut.COMPLETED, completedAt: new Date() },
+      });
+
+      await this.notificationsService.create({
+        userId: booking.passenger.user.id,
+        bookingId: id,
+        type: 'TRIP_COMPLETED',
+        titre: 'Trajet terminé',
+        message: `Votre trajet ${booking.departure} → ${booking.destination} est terminé. Merci d'utiliser AutoConnect !`,
+      });
+
+      return updated;
+    }
+
+    // Par défaut (ADMIN ou cas non couverts ci-dessus)
+    return this.prisma.booking.update({
+      where: { id },
+      data: { statut: dto.statut },
     });
   }
 
+  private getCancellationPolicy(booking: any, cancelledByPassenger: boolean) {
+    if (!booking.payment || booking.payment.statut !== PaymentStatut.COMPLETED) {
+      return { action: 'no_refund', reason: 'Aucun paiement à rembourser' };
+    }
+
+    const isEarlyCancellation = booking.scheduledAt
+      ? new Date(booking.scheduledAt).getTime() - Date.now() >= 2 * 60 * 60 * 1000
+      : true;
+
+    if (!cancelledByPassenger) {
+      return { action: 'refund', reason: 'Annulation par le chauffeur - remboursement intégral' };
+    }
+
+    if (isEarlyCancellation) {
+      return { action: 'refund', reason: 'Annulation client > 2h avant le départ - remboursement intégral' };
+    }
+
+    return { action: 'refund', reason: 'Annulation client tardive - remboursement partiel (flux de remboursement à implémenter)' };
+  }
+
+  // ─────────────────────────────────────────────────
+  // DÉMARRAGE DU TRAJET — Validation GPS + OTP/QR
+  // ─────────────────────────────────────────────────
+
   async startTrip(id: string, userId: string, role: string, dto: StartBookingDto) {
-    if (role !== 'CHAUFFEUR') {
-        throw new ForbiddenException('Seul le chauffeur peut démarrer le trajet');
+    if (role !== Role.CHAUFFEUR) {
+      throw new ForbiddenException('Seul le chauffeur peut démarrer le trajet');
     }
 
     const booking = await this.findOne(id, userId, role);
 
     if (booking.statut !== BookingStatut.PAID) {
-        throw new BadRequestException('La réservation doit être payée avant de démarrer le trajet');
+      throw new BadRequestException(
+        'La réservation doit être payée avant de démarrer le trajet',
+      );
     }
 
-    // 1. Validation GPS
+    // 1. Validation GPS — vérifie que chauffeur et passager sont proches
     this.gpsService.verifyProximity(
-        dto.driverLatitude,
-        dto.driverLongitude,
-        dto.passengerLatitude,
-        dto.passengerLongitude
+      dto.driverLatitude,
+      dto.driverLongitude,
+      dto.passengerLatitude,
+      dto.passengerLongitude,
     );
 
-    // 2. Validation OTP ou QR Code
+    // 2. Validation OTP ou QR Code — au moins un des deux est requis
     let isValidated = false;
 
     if (dto.otp) {
-        isValidated = this.otpService.verifyOtp(dto.otp, booking.otpCode, booking.otpExpiresAt);
-        if (!isValidated) {
-            throw new BadRequestException('Code OTP invalide ou expiré');
-        }
+      isValidated = this.otpService.verifyOtp(
+        dto.otp,
+        booking.otpCode,
+        booking.otpExpiresAt,
+      );
+      if (!isValidated) {
+        throw new BadRequestException('Code OTP invalide ou expiré');
+      }
     } else if (dto.qrData) {
-        try {
-            const parsedData = JSON.parse(dto.qrData);
-            if (parsedData.bookingId === booking.id) {
-                isValidated = true;
-            } else {
-                throw new BadRequestException('QR Code invalide pour cette réservation');
-            }
-        } catch (e) {
-            throw new BadRequestException('Données QR Code mal formées');
+      try {
+        const parsedData = JSON.parse(dto.qrData) as { bookingId: string };
+        if (parsedData.bookingId !== booking.id) {
+          throw new BadRequestException('QR Code invalide pour cette réservation');
         }
+        isValidated = true;
+      } catch {
+        throw new BadRequestException('Données QR Code mal formées');
+      }
     } else {
-        throw new BadRequestException('Vous devez fournir un OTP ou un QR Code scanné pour valider le trajet');
+      throw new BadRequestException(
+        'Vous devez fournir un OTP ou un QR Code scanné pour valider le trajet',
+      );
     }
 
-    // 3. Mise à jour de la réservation
-    return this.prisma.booking.update({
-        where: { id },
-        data: {
-            statut: BookingStatut.IN_PROGRESS,
-            startedAt: new Date(),
-            gpsValidated: true,
-            otpVerified: !!dto.otp,
-            qrCodeScanned: !!dto.qrData,
-            otpCode: null, // Invalider l'OTP
-            otpExpiresAt: null
-        }
+    // 3. Mettre à jour la réservation
+    const updated = await this.prisma.booking.update({
+      where: { id },
+      data: {
+        statut: BookingStatut.IN_PROGRESS,
+        startedAt: new Date(),
+        gpsValidated: true,
+        otpVerified: !!dto.otp && isValidated,
+        qrCodeScanned: !!dto.qrData && isValidated,
+        otpCode: null,       // Invalider l'OTP après utilisation
+        otpExpiresAt: null,
+      },
     });
+
+    // 4. Notifier le passager
+    await this.notificationsService.create({
+      userId: booking.passenger.user.id,
+      bookingId: id,
+      type: 'TRIP_STARTED',
+      titre: 'Trajet démarré',
+      message: `Votre trajet vers ${booking.destination} a démarré !`,
+    });
+
+    return updated;
   }
 }

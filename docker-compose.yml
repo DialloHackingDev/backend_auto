@@ -1,0 +1,43 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: autoconnect_secret
+      POSTGRES_DB: autoconnect
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      API_VERSION: v1
+      DATABASE_URL: "postgresql://postgres:autoconnect_secret@postgres:5432/autoconnect?schema=public"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: autoconnect_secret
+      POSTGRES_DB: autoconnect
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: redis_secret
+      JWT_SECRET: autoconnect_jwt_super_secret_key_change_in_prod
+      JWT_REFRESH_SECRET: autoconnect_refresh_super_secret_key_change_in_prod
+      CORS_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost:8080
+      THROTTLE_TTL: 60000
+      THROTTLE_LIMIT: 100
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:

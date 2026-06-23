@@ -1,0 +1,86 @@
+
+> backend@0.0.1 build
+> nest build
+
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'caseless'.
+  The file is in the program because:
+    Entry point for implicit type library 'caseless'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'debug'.
+  The file is in the program because:
+    Entry point for implicit type library 'debug'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'http-proxy'.
+  The file is in the program because:
+    Entry point for implicit type library 'http-proxy'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'luxon'.
+  The file is in the program because:
+    Entry point for implicit type library 'luxon'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'mdast'.
+  The file is in the program because:
+    Entry point for implicit type library 'mdast'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'multer'.
+  The file is in the program because:
+    Entry point for implicit type library 'multer'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'node-fetch'.
+  The file is in the program because:
+    Entry point for implicit type library 'node-fetch'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'node-int64'.
+  The file is in the program because:
+    Entry point for implicit type library 'node-int64'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'phoenix'.
+  The file is in the program because:
+    Entry point for implicit type library 'phoenix'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'q'.
+  The file is in the program because:
+    Entry point for implicit type library 'q'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'readable-stream'.
+  The file is in the program because:
+    Entry point for implicit type library 'readable-stream'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'request'.
+  The file is in the program because:
+    Entry point for implicit type library 'request'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'retry'.
+  The file is in the program because:
+    Entry point for implicit type library 'retry'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'thrift'.
+  The file is in the program because:
+    Entry point for implicit type library 'thrift'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'tough-cookie'.
+  The file is in the program because:
+    Entry point for implicit type library 'tough-cookie'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'unist'.
+  The file is in the program because:
+    Entry point for implicit type library 'unist'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'uuid'.
+  The file is in the program because:
+    Entry point for implicit type library 'uuid'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'webidl-conversions'.
+  The file is in the program because:
+    Entry point for implicit type library 'webidl-conversions'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'whatwg-url'.
+  The file is in the program because:
+    Entry point for implicit type library 'whatwg-url'
+[91merror[0m[90m TS2688: [0mCannot find type definition file for 'ws'.
+  The file is in the program because:
+    Entry point for implicit type library 'ws'
+[96msrc/disputes/dto/resolve-dispute.dto.ts[0m:[93m23[0m:[93m11[0m - [91merror[0m[90m TS2702: [0m'DisputeStatut' only refers to a type, but is being used as a namespace here.
+
+[7m23[0m   statut: DisputeStatut.RESOLU | DisputeStatut.REJETE;
+[7m  [0m [91m          ~~~~~~~~~~~~~[0m
+[96msrc/disputes/dto/resolve-dispute.dto.ts[0m:[93m23[0m:[93m34[0m - [91merror[0m[90m TS2702: [0m'DisputeStatut' only refers to a type, but is being used as a namespace here.
+
+[7m23[0m   statut: DisputeStatut.RESOLU | DisputeStatut.REJETE;
+[7m  [0m [91m                                 ~~~~~~~~~~~~~[0m
+[96msrc/notifications/notifications.service.ts[0m:[93m33[0m:[93m9[0m - [91merror[0m[90m TS2322: [0mType 'Record<string, unknown> | undefined' is not assignable to type 'NullableJsonNullValueInput | InputJsonValue | undefined'.
+  Type 'Record<string, unknown>' is not assignable to type 'NullableJsonNullValueInput | InputJsonValue | undefined'.
+    Type 'Record<string, unknown>' is missing the following properties from type 'readonly (InputJsonValue | null)[]': length, concat, join, slice, and 26 more.
+
+[7m33[0m         data: dto.data,
+[7m  [0m [91m        ~~~~[0m
+
+  [96mnode_modules/.prisma/client/index.d.ts[0m:[93m21842[0m:[93m5[0m
+    [7m21842[0m     data?: NullableJsonNullValueInput | InputJsonValue
+    [7m     [0m [96m    ~~~~[0m
+    The expected type comes from property 'data' which is declared here on type '(Without<NotificationCreateInput, NotificationUncheckedCreateInput> & NotificationUncheckedCreateInput) | (Without<...> & NotificationCreateInput)'
+
+Found 23 error(s).
+
